@@ -5,10 +5,10 @@ MAST Core
 
 This the base class for MAST queries.
 """
+from astropy.utils import deprecated
 from ..query import QueryWithLogin
 from . import utils
 from .auth import MastAuth
-from .cloud import CloudAccess
 from .discovery_portal import PortalAPI
 from .services import ServiceAPI
 
@@ -46,7 +46,7 @@ class MastQueryWithLogin(QueryWithLogin):
             Default is None.
             The token to authenticate the user.
             This can be generated at
-            https://auth.mast.stsci.edu/token?suggested_name=Astroquery&suggested_scope=mast:exclusive_access.
+            https://ssoportal.stsci.edu/idp/profile/SAML2/Redirect/SSO?execution=e1s1
             If not supplied, it will be prompted for if not in the keyring or set via $MAST_API_TOKEN
         store_token : bool, optional
             Default False.
@@ -82,6 +82,8 @@ class MastQueryWithLogin(QueryWithLogin):
         self._auth_obj.logout()
         self._authenticated = False
 
+    @deprecated(since='v0.4.8',
+                message=('This function is non-operational and will be removed in a future release.'))
     def enable_cloud_dataset(self, provider="AWS", profile=None, verbose=True):
         """
         Enable downloading public files from S3 instead of MAST.
@@ -98,14 +100,15 @@ class MastQueryWithLogin(QueryWithLogin):
             Default True.
             Logger to display extra info and warning.
         """
+        pass
 
-        self._cloud_connection = CloudAccess(provider, profile, verbose)
-
+    @deprecated(since='v0.4.8',
+                message=('This function is non-operational and will be removed in a future release.'))
     def disable_cloud_dataset(self):
         """
-        Disables downloading public files from S3 instead of MAST
+        Disables downloading public files from S3 instead of MAST.
         """
-        self._cloud_connection = None
+        pass
 
     def resolve_object(self, objectname):
         """

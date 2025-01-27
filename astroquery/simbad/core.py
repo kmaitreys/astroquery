@@ -90,6 +90,7 @@ class _Join:
     column_left: Any
     column_right: Any
     join_type: str = field(default="JOIN")
+    alias: str = field(default=None)
 
 
 class SimbadClass(BaseVOQuery):
@@ -175,6 +176,7 @@ class SimbadClass(BaseVOQuery):
         - `query_objects`,
         - `query_region`,
         - `query_catalog`,
+        - `query_hierarchy`,
         - `query_bibobj`,
         - `query_criteria`.
 
@@ -232,18 +234,19 @@ class SimbadClass(BaseVOQuery):
         >>> options = Simbad.list_votable_fields() # doctest: +REMOTE_DATA
         >>> # to print only the available bundles of columns
         >>> options[options["type"] == "bundle of basic columns"][["name", "description"]] # doctest: +REMOTE_DATA
-        <Table length=8>
-            name                         description
-            object                           object
-        ------------- ----------------------------------------------------
-          coordinates                  all fields related with coordinates
-                  dim          major and minor axis, angle and inclination
-           dimensions              all fields related to object dimensions
-            morphtype         all fields related to the morphological type
-             parallax                     all fields related to parallaxes
-        propermotions           all fields related with the proper motions
-                   sp            all fields related with the spectral type
-             velocity all fields related with radial velocity and redshift
+        <Table length=9>
+             name                           description
+            object                             object
+        ------------- -------------------------------------------------------
+          coordinates                     all fields related with coordinates
+                  dim             major and minor axis, angle and inclination
+           dimensions                 all fields related to object dimensions
+            morphtype            all fields related to the morphological type
+             parallax                        all fields related to parallaxes
+                   pm proper motion values in right ascension and declination
+        propermotions              all fields related with the proper motions
+                   sp               all fields related with the spectral type
+             velocity    all fields related with radial velocity and redshift
         """
         # get the tables with a simple link to basic
         query_tables = """SELECT DISTINCT table_name AS name, tables.description
@@ -358,6 +361,7 @@ class SimbadClass(BaseVOQuery):
         - `query_objects`,
         - `query_region`,
         - `query_catalog`,
+        - `query_hierarchy`,
         - `query_bibobj`,
         - `query_criteria`.
 
@@ -377,9 +381,10 @@ class SimbadClass(BaseVOQuery):
         """
 
         # the legacy way of adding fluxes
-        args = list(args)
+        args = set(args)
         fluxes_to_add = []
-        for arg in args:
+        args_copy = args.copy()
+        for arg in args_copy:
             if arg.startswith("flux_"):
                 raise ValueError("The votable fields 'flux_***(filtername)' are removed and replaced "
                                  "by 'flux' that will add all information for every filters. "
@@ -387,19 +392,22 @@ class SimbadClass(BaseVOQuery):
                                  "https://astroquery.readthedocs.io/en/latest/simbad/simbad_evolution.html"
                                  " to see the new ways to interact with SIMBAD's fluxes.")
             if re.match(r"^flux.*\(.+\)$", arg):
-                warnings.warn("The notation 'flux(U)' is deprecated since 0.4.8 in favor of 'U'. "
-                              "See section on filters in "
+                filter_name = re.findall(r"\((\w+)\)", arg)[0]
+                warnings.warn(f"The notation 'flux({filter_name})' is deprecated since 0.4.8 in favor of "
+                              f"'{filter_name}'. You will see the column appearing with its new name "
+                              "in the output. See section on filters in "
                               "https://astroquery.readthedocs.io/en/latest/simbad/simbad_evolution.html "
                               "to see the new ways to interact with SIMBAD's fluxes.", DeprecationWarning, stacklevel=2)
-                fluxes_to_add.append(re.findall(r"\((\w+)\)", arg)[0])
+                fluxes_to_add.append(filter_name)
                 args.remove(arg)
 
         # output options
         output_options = self.list_votable_fields()
         # fluxes are case-dependant
-        fluxes = output_options[output_options["type"] == "filter name"]["name"]
+        fluxes = set(output_options[output_options["type"] == "filter name"]["name"])
         # add fluxes
-        fluxes_to_add += [flux for flux in args if flux in fluxes]
+        fluxes_from_names = set(flux for flux in args if flux in fluxes)
+        fluxes_to_add += fluxes_from_names
         if fluxes_to_add:
             self.joins.append(_Join("allfluxes", _Column("basic", "oid"),
                               _Column("allfluxes", "oidref")))
@@ -410,6 +418,10 @@ class SimbadClass(BaseVOQuery):
                     self.columns_in_output.append(_Column("allfluxes", flux + "_", flux))
                 else:
                     self.columns_in_output.append(_Column("allfluxes", flux))
+        # remove the arguments already added
+        args -= fluxes_from_names
+        # remove filters from output options
+        output_options = output_options[output_options["type"] != "filter name"]
 
         # casefold args because we allow case difference for every other argument (legacy behavior)
         args = set(map(str.casefold, args))
@@ -486,6 +498,7 @@ class SimbadClass(BaseVOQuery):
         - `query_objects`,
         - `query_region`,
         - `query_catalog`,
+        - `query_hierarchy`,
         - `query_bibobj`,
         - `query_criteria`.
 
@@ -670,10 +683,11 @@ class SimbadClass(BaseVOQuery):
         upload_name = "TAP_UPLOAD.script_infos"
         columns.append(_Column(upload_name, "*"))
 
+        # join on ident needs an alias in case the users want to add the votable field ident
         left_joins = [_Join("ident", _Column(upload_name, "user_specified_id"),
-                            _Column("ident", "id"), "LEFT JOIN"),
+                            _Column("ident", "id"), "LEFT JOIN", "ident_upload"),
                       _Join("basic", _Column("basic", "oid"),
-                            _Column("ident", "oidref"), "LEFT JOIN")]
+                            _Column("ident_upload", "oidref"), "LEFT JOIN")]
         for join in joins:
             left_joins.append(_Join(join.table, join.column_left,
                                     join.column_right, "LEFT JOIN"))
@@ -716,28 +730,29 @@ class SimbadClass(BaseVOQuery):
         Examples
         --------
 
-        Look for large galaxies in two cones
+        Look for largest galaxies in two cones
 
         >>> from astroquery.simbad import Simbad
         >>> from astropy.coordinates import SkyCoord
         >>> simbad = Simbad()
         >>> simbad.ROW_LIMIT = 5
-        >>> simbad.add_votable_fields("otype") # doctest: +REMOTE_DATA
+        >>> simbad.add_votable_fields("otype", "dim") # doctest: +REMOTE_DATA
         >>> coordinates = SkyCoord([SkyCoord(186.6, 12.7, unit=("deg", "deg")),
         ...                         SkyCoord(170.75, 23.9, unit=("deg", "deg"))])
         >>> result = simbad.query_region(coordinates, radius="2d5m",
-        ...                              criteria="otype = 'Galaxy..' AND galdim_majaxis>8") # doctest: +REMOTE_DATA
-        >>> result.sort("main_id") # doctest: +REMOTE_DATA
-        >>> result["main_id", "otype"] # doctest: +REMOTE_DATA
+        ...                              criteria="otype = 'Galaxy..' AND galdim_majaxis>8.5") # doctest: +REMOTE_DATA
+        >>> result.sort("galdim_majaxis", reverse=True) # doctest: +REMOTE_DATA
+        >>> result["main_id", "otype", "galdim_majaxis"] # doctest: +REMOTE_DATA
         <Table length=5>
-          main_id    otype
-           object    object
-        ------------ ------
-        LEDA   40577    GiG
-        LEDA   41362    GiC
-               M  86    GiG
-               M  87    AGN
-           NGC  4438    LIN
+          main_id    otype  galdim_majaxis
+                                arcmin
+           object    object    float32
+        ------------ ------ --------------
+        LEDA   41362    GiC           11.0
+               M  86    GiG          10.47
+        LEDA   40917    AG?           10.3
+               M  87    AGN           9.12
+           NGC  4438    LIN           8.91
 
         Notes
         -----
@@ -850,6 +865,86 @@ class SimbadClass(BaseVOQuery):
             instance_criteria.append(f"({criteria})")
 
         return self._query(top, columns, joins, instance_criteria,
+                           get_query_payload=get_query_payload)
+
+    def query_hierarchy(self, name, hierarchy, *,
+                        detailed_hierarchy=False,
+                        criteria=None, get_query_payload=False):
+        """Query either the parents or the children of the object.
+
+        Parameters
+        ----------
+        name : str
+            name of the object
+        hierarchy : str
+            Can take the values "parents" to return the parents of the object (ex: a
+            galaxy cluster is a parent of a galaxy), the value "children" to return
+            the children of an object (ex: stars can be children of a globular cluster),
+            or the value "siblings" to return the object that share a parent with the
+            given one (ex: the stars of an open cluster are all siblings).
+        detailed_hierarchy : bool
+            Whether to add the two extra columns 'hierarchy_bibcode' that gives the
+            article in which the hierarchy link is mentioned, and
+            'membership_certainty'. membership_certainty is an integer that reflects the
+            certainty of the hierarchy link according to the authors. Ranges between 0
+            and 100 where 100 means that the authors were certain of the classification.
+            Defaults to False.
+        criteria : str
+            Criteria to be applied to the query. These should be written in the ADQL
+            syntax in a single string. See example.
+        get_query_payload : bool, optional
+            When set to `True` the method returns the HTTP request parameters without
+            querying SIMBAD. The ADQL string is in the 'QUERY' key of the payload.
+            Defaults to `False`.
+
+        Returns
+        -------
+        table : `~astropy.table.Table`
+            Query results table
+
+        Examples
+        --------
+        >>> from astroquery.simbad import Simbad
+        >>> parent = Simbad.query_hierarchy("2MASS J18511048-0615470",
+        ...                                 hierarchy="parents")  # doctest: +REMOTE_DATA
+        >>> parent[["main_id", "ra", "dec"]] # doctest: +REMOTE_DATA
+        <Table length=1>
+         main_id     ra     dec
+                    deg     deg
+          object  float64 float64
+        --------- ------- -------
+        NGC  6705 282.766  -6.272
+        """
+        top, columns, joins, instance_criteria = self._get_query_parameters()
+
+        sub_query = ("(SELECT oidref FROM ident "
+                     f"WHERE id = '{name}') AS name")
+
+        if detailed_hierarchy:
+            columns.append(_Column("h_link", "link_bibcode", "hierarchy_bibcode"))
+            columns.append(_Column("h_link", "membership", "membership_certainty"))
+
+        if hierarchy == "parents":
+            joins += [_Join("h_link", _Column("basic", "oid"), _Column("h_link", "parent"))]
+            instance_criteria.append("h_link.child = name.oidref")
+        elif hierarchy == "children":
+            joins += [_Join("h_link", _Column("basic", "oid"), _Column("h_link", "child"))]
+            instance_criteria.append("h_link.parent = name.oidref")
+        elif hierarchy == "siblings":
+            sub_query = ("(SELECT DISTINCT basic.oid FROM "
+                         f"{sub_query}, basic JOIN h_link ON basic.oid = h_link.parent "
+                         "WHERE h_link.child = name.oidref) AS parents")
+            joins += [_Join("h_link", _Column("basic", "oid"), _Column("h_link", "child"))]
+            instance_criteria.append("h_link.parent = parents.oid")
+        else:
+            raise ValueError("'hierarchy' can only take the values 'parents', "
+                             f"'siblings', or 'children'. Got '{hierarchy}'.")
+
+        if criteria:
+            instance_criteria.append(f"({criteria})")
+
+        return self._query(top, columns, joins, instance_criteria,
+                           from_table=f"{sub_query}, basic", distinct=True,
                            get_query_payload=get_query_payload)
 
     @deprecated_renamed_argument(["verbose"], new_name=[None],
@@ -1332,7 +1427,7 @@ class SimbadClass(BaseVOQuery):
         ...                  my_table_name=letters_table) # doctest: +REMOTE_DATA
         <Table length=3>
         alphabet
-         object
+          str1
         --------
                a
                b
@@ -1366,7 +1461,7 @@ class SimbadClass(BaseVOQuery):
         """Get the current building blocks of an ADQL query."""
         return tuple(map(copy.deepcopy, (self.ROW_LIMIT, self.columns_in_output, self.joins, self.criteria)))
 
-    def _query(self, top, columns, joins, criteria, from_table="basic",
+    def _query(self, top, columns, joins, criteria, from_table="basic", distinct=False,
                get_query_payload=False, **uploads):
         """Generate an ADQL string from the given query parameters and executes the query.
 
@@ -1383,6 +1478,8 @@ class SimbadClass(BaseVOQuery):
             with an AND clause.
         from_table : str, optional
             The table after 'FROM' in the ADQL string. Defaults to "basic".
+        distinct : bool, optional
+            Whether to add the DISTINCT instruction to the query.
         get_query_payload : bool, optional
             When set to `True` the method returns the HTTP request parameters without
             querying SIMBAD. The ADQL string is in the 'QUERY' key of the payload.
@@ -1397,6 +1494,7 @@ class SimbadClass(BaseVOQuery):
         `~astropy.table.Table`
             The result of the query to SIMBAD.
         """
+        distinct_results = " DISTINCT" if distinct else ""
         top_part = f" TOP {top}" if top != -1 else ""
 
         # columns
@@ -1415,7 +1513,12 @@ class SimbadClass(BaseVOQuery):
         else:
             unique_joins = []
             [unique_joins.append(join) for join in joins if join not in unique_joins]
-            join = " " + " ".join([(f'{join.join_type} {join.table} ON {join.column_left.table}."'
+            # the joined tables can have an alias. We handle the two cases here
+            join = " " + " ".join([(f'{join.join_type} {join.table} AS {join.alias} '
+                                    f'ON {join.column_left.table}."{join.column_left.name}" = '
+                                    f'{join.alias}."{join.column_right.name}"')
+                                   if join.alias is not None else
+                                   (f'{join.join_type} {join.table} ON {join.column_left.table}."'
                                     f'{join.column_left.name}" = {join.column_right.table}."'
                                     f'{join.column_right.name}"') for join in unique_joins])
 
@@ -1425,7 +1528,7 @@ class SimbadClass(BaseVOQuery):
         else:
             criteria = ""
 
-        query = f"SELECT{top_part}{columns} FROM {from_table}{join}{criteria}"
+        query = f"SELECT{distinct_results}{top_part}{columns} FROM {from_table}{join}{criteria}"
 
         response = self.query_tap(query, get_query_payload=get_query_payload,
                                   maxrec=self.hardlimit,

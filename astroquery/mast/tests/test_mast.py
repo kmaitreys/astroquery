@@ -7,21 +7,24 @@ from shutil import copyfile
 
 import pytest
 
-from astropy.table import Table
+from astropy.table import Table, unique
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 
 import astropy.units as u
+from requests import HTTPError, Response
 
 from astroquery.mast.services import _json_to_table
 from astroquery.utils.mocks import MockResponse
-from astroquery.exceptions import InvalidQueryError, InputWarning
+from astroquery.exceptions import InvalidQueryError, InputWarning, MaxResultsWarning
 
 from astroquery import mast
 
 DATA_FILES = {'Mast.Caom.Cone': 'caom.json',
               'Mast.Name.Lookup': 'resolver.json',
               'mission_search_results': 'mission_results.json',
+              'mission_columns': 'mission_columns.json',
+              'mission_products': 'mission_products.json',
               'columnsconfig': 'columnsconfig.json',
               'ticcolumns': 'ticcolumns.json',
               'ticcol_filtered': 'ticcolumns_filtered.json',
@@ -46,6 +49,7 @@ DATA_FILES = {'Mast.Caom.Cone': 'caom.json',
               'Mast.HscMatches.Db.v2': 'matchid.json',
               'Mast.HscSpectra.Db.All': 'spectra.json',
               'panstarrs': 'panstarrs.json',
+              'panstarrs_columns': 'panstarrs_columns.json',
               'tess_cutout': 'astrocut_107.27_-70.0_5x5.zip',
               'tess_sector': 'tess_sector.json',
               'z_cutout_fit': 'astrocut_189.49206_62.20615_100x100px_f.zip',
@@ -62,7 +66,7 @@ def data_path(filename):
 def patch_post(request):
     mp = request.getfixturevalue("monkeypatch")
 
-    mp.setattr(mast.utils, '_simple_request', resolver_mockreturn)
+    mp.setattr(mast.utils, '_simple_request', request_mockreturn)
     mp.setattr(mast.discovery_portal.PortalAPI, '_request', post_mockreturn)
     mp.setattr(mast.services.ServiceAPI, '_request', service_mockreturn)
     mp.setattr(mast.auth.MastAuth, 'session_info', session_info_mockreturn)
@@ -70,6 +74,7 @@ def patch_post(request):
     mp.setattr(mast.Observations, '_download_file', download_mockreturn)
     mp.setattr(mast.Observations, 'download_file', download_mockreturn)
     mp.setattr(mast.Catalogs, '_download_file', download_mockreturn)
+    mp.setattr(mast.MastMissions, '_download_file', download_mockreturn)
     mp.setattr(mast.Tesscut, '_download_file', tesscut_download_mockreturn)
     mp.setattr(mast.Zcut, '_download_file', zcut_download_mockreturn)
 
@@ -106,7 +111,7 @@ def post_mockreturn(self, method="POST", url=None, data=None, timeout=10, **kwar
     return [MockResponse(content)]
 
 
-def service_mockreturn(self, method="POST", url=None, data=None, timeout=10, use_json=False, **kwargs):
+def service_mockreturn(self, method="POST", url=None, data=None, params=None, timeout=10, use_json=False, **kwargs):
     if "panstarrs" in url:
         filename = data_path(DATA_FILES["panstarrs"])
     elif "tesscut" in url:
@@ -119,6 +124,8 @@ def service_mockreturn(self, method="POST", url=None, data=None, timeout=10, use
             filename = data_path(DATA_FILES['z_survey'])
         else:
             filename = data_path(DATA_FILES['z_cutout_fit'])
+    elif use_json and 'list_products' in url:
+        filename = data_path(DATA_FILES['mission_products'])
     elif use_json and data['radius'] == 300:
         filename = data_path(DATA_FILES["mission_incorrect_results"])
     elif use_json:
@@ -128,14 +135,24 @@ def service_mockreturn(self, method="POST", url=None, data=None, timeout=10, use
     return MockResponse(content)
 
 
-def resolver_mockreturn(*args, **kwargs):
-    filename = data_path(DATA_FILES["Mast.Name.Lookup"])
+def request_mockreturn(url, params={}):
+    if 'column_list' in url:
+        filename = data_path(DATA_FILES['mission_columns'])
+    elif 'Mast.Name.Lookup' in params:
+        filename = data_path(DATA_FILES["Mast.Name.Lookup"])
+    elif 'panstarrs' in url:
+        filename = data_path(DATA_FILES['panstarrs_columns'])
     with open(filename, 'rb') as infile:
         content = infile.read()
     return MockResponse(content)
 
 
 def download_mockreturn(*args, **kwargs):
+    if 'unauthorized' in args[0]:
+        response = Response()
+        response.reason = 'Unauthorized'
+        response.status_code = 401
+        raise HTTPError(response=response)
     return ('COMPLETE', None, None)
 
 
@@ -204,66 +221,208 @@ def test_missions_query_object(patch_post):
 
 
 def test_missions_query_region(patch_post):
-    result = mast.MastMissions.query_region(regionCoords, radius=0.002 * u.deg)
+    result = mast.MastMissions.query_region(regionCoords,
+                                            radius=0.002 * u.deg,
+                                            select_cols=['sci_pep_id'])
     assert isinstance(result, Table)
     assert len(result) > 0
 
 
 def test_missions_query_criteria_async(patch_post):
-    pep_id = {'sci_pep_id': '12556'}
-    obs_type = {'sci_obs_type': "SPECTRUM"}
-    instruments = {'sci_instrume': "stis,acs,wfc3,cos,fos,foc,nicmos,ghrs"}
-    datasets = {'sci_data_set_name': ""}
-    pi_lname = {'sci_pi_last_name': ""}
-    spec_1234 = {'sci_spec_1234': ""}
-    release_date = {'sci_release_date': ""}
-    start_time = {'sci_start_time': ""}
-    obs_type = {'sci_obs_type': 'all'}
-    aec = {'sci_aec': 'S'}
-    responses = mast.MastMissions.query_criteria_async(coordinates=regionCoords,
-                                                       radius=3,
-                                                       conditions=[pep_id,
-                                                                   obs_type,
-                                                                   instruments,
-                                                                   datasets,
-                                                                   pi_lname,
-                                                                   spec_1234,
-                                                                   release_date,
-                                                                   start_time,
-                                                                   obs_type,
-                                                                   aec])
+    responses = mast.MastMissions.query_criteria_async(
+        coordinates=regionCoords,
+        radius=3,
+        sci_pep_id=12556,
+        sci_obs_type='SPECTRUM',
+        sci_instrume='stis,acs,wfc3,cos,fos,foc,nicmos,ghrs',
+        sci_aec='S'
+    )
     assert isinstance(responses, MockResponse)
 
 
 def test_missions_query_criteria_async_with_missing_results(patch_post):
-    pep_id = {'sci_pep_id': '12556'}
-    obs_type = {'sci_obs_type': "SPECTRUM"}
-    instruments = {'sci_instrume': "stis,acs,wfc3,cos,fos,foc,nicmos,ghrs"}
-    datasets = {'sci_data_set_name': ""}
-    pi_lname = {'sci_pi_last_name': ""}
-    spec_1234 = {'sci_spec_1234': ""}
-    release_date = {'sci_release_date': ""}
-    start_time = {'sci_start_time': ""}
-    obs_type = {'sci_obs_type': 'all'}
-    aec = {'sci_aec': 'S'}
-    aperture = {'sci_aper_1234': 'WF3'}
-
     with pytest.raises(KeyError):
-        responses = mast.MastMissions.query_criteria_async(coordinates=regionCoords,
-                                                           radius=5,
-                                                           conditions=[pep_id,
-                                                                       obs_type,
-                                                                       instruments,
-                                                                       datasets,
-                                                                       pi_lname,
-                                                                       spec_1234,
-                                                                       release_date,
-                                                                       start_time,
-                                                                       obs_type,
-                                                                       aec,
-                                                                       aperture])
+        responses = mast.MastMissions.query_criteria_async(
+            coordinates=regionCoords,
+            radius=5,
+            sci_pep_id=12556,
+            sci_obs_type='SPECTRUM',
+            sci_instrume='stis,acs,wfc3,cos,fos,foc,nicmos,ghrs',
+            sci_aec='S',
+            sci_aper_1234='WF3'
+        )
         _json_to_table(json.loads(responses), 'results')
 
+
+def test_missions_query_criteria(patch_post):
+    result = mast.MastMissions.query_criteria(
+        coordinates=regionCoords,
+        radius=3,
+        sci_pep_id=12556,
+        sci_obs_type='SPECTRUM',
+        sci_instrume='stis,acs,wfc3,cos,fos,foc,nicmos,ghrs',
+        sci_aec='S',
+        select_cols=['sci_pep_id', 'sci_instrume']
+    )
+    assert isinstance(result, Table)
+    assert len(result) > 0
+
+    # Raise error if non-positional criteria is not supplied
+    with pytest.raises(InvalidQueryError):
+        mast.MastMissions.query_criteria(
+            coordinates=regionCoords,
+            radius=3
+        )
+
+    # Raise error if invalid criteria is supplied
+    with pytest.raises(InvalidQueryError):
+        mast.MastMissions.query_criteria(
+            coordinates=regionCoords,
+            invalid=True
+        )
+
+    # Maximum results warning
+    with pytest.warns(MaxResultsWarning):
+        mast.MastMissions.query_criteria(
+            coordinates=regionCoords,
+            sci_aec='S',
+            limit=1
+        )
+
+
+def test_missions_get_product_list_async(patch_post):
+    # String input
+    result = mast.MastMissions.get_product_list_async('Z14Z0104T')
+    assert isinstance(result, MockResponse)
+
+    # List input
+    in_datasets = ['Z14Z0104T', 'Z14Z0102T']
+    result = mast.MastMissions.get_product_list_async(in_datasets)
+    assert isinstance(result, MockResponse)
+
+    # Row input
+    datasets = mast.MastMissions.query_object("M101", radius=".002 deg")
+    result = mast.MastMissions.get_product_list_async(datasets[:3])
+    assert isinstance(result, MockResponse)
+
+    # Table input
+    result = mast.MastMissions.get_product_list_async(datasets[0])
+    assert isinstance(result, MockResponse)
+
+    # Unsupported data type for datasets
+    with pytest.raises(TypeError) as err_type:
+        mast.MastMissions.get_product_list_async(1)
+    assert 'Unsupported data type' in str(err_type.value)
+
+    # Empty dataset list
+    with pytest.raises(InvalidQueryError) as err_empty:
+        mast.MastMissions.get_product_list_async([' '])
+    assert 'Dataset list is empty' in str(err_empty.value)
+
+
+def test_missions_get_product_list(patch_post):
+    # String input
+    result = mast.MastMissions.get_product_list('Z14Z0104T')
+    assert isinstance(result, Table)
+
+    # List input
+    in_datasets = ['Z14Z0104T', 'Z14Z0102T']
+    result = mast.MastMissions.get_product_list(in_datasets)
+    assert isinstance(result, Table)
+
+    # Row input
+    datasets = mast.MastMissions.query_object("M101", radius=".002 deg")
+    result = mast.MastMissions.get_product_list(datasets[:3])
+    assert isinstance(result, Table)
+
+    # Table input
+    result = mast.MastMissions.get_product_list(datasets[0])
+    assert isinstance(result, Table)
+
+
+def test_missions_get_unique_product_list(patch_post, caplog):
+    unique_products = mast.MastMissions.get_unique_product_list('Z14Z0104T')
+    assert isinstance(unique_products, Table)
+    assert (unique_products == unique(unique_products, keys='filename')).all()
+    # No INFO messages should be logged
+    with caplog.at_level('INFO', logger='astroquery'):
+        assert caplog.text == ''
+
+
+def test_missions_filter_products(patch_post):
+    # Filter products list by column
+    products = mast.MastMissions.get_product_list('Z14Z0104T')
+    filtered = mast.MastMissions.filter_products(products,
+                                                 category='CALIBRATED')
+    assert isinstance(filtered, Table)
+    assert all(filtered['category'] == 'CALIBRATED')
+
+    # Filter by non-existing column
+    with pytest.warns(InputWarning):
+        mast.MastMissions.filter_products(products,
+                                          invalid=True)
+
+
+def test_missions_download_products(patch_post, tmp_path):
+    # Check string input
+    test_dataset_id = 'Z14Z0104T'
+    result = mast.MastMissions.download_products(test_dataset_id,
+                                                 download_dir=tmp_path)
+    assert isinstance(result, Table)
+
+    # Check Row input
+    prods = mast.MastMissions.get_product_list('Z14Z0104T')
+    result = mast.MastMissions.download_products(prods[0],
+                                                 download_dir=tmp_path)
+    assert isinstance(result, Table)
+
+
+def test_missions_download_no_auth(patch_post, caplog):
+    # Exclusive access products should not be downloaded if user is not authenticated
+    # User is not authenticated
+    uri = 'unauthorized.fits'
+    result = mast.MastMissions.download_file(uri)
+    assert result[0] == 'ERROR'
+    assert 'HTTPError' in result[1]
+    with caplog.at_level('WARNING', logger='astroquery'):
+        assert 'You are not authorized to download' in caplog.text
+        assert 'Please authenticate yourself' in caplog.text
+    caplog.clear()
+
+    # User is authenticated, but doesn't have proper permissions
+    test_token = "56a9cf3df4c04052atest43feb87f282"
+    mast.MastMissions.login(token=test_token)
+    result = mast.MastMissions.download_file(uri)
+    assert result[0] == 'ERROR'
+    assert 'HTTPError' in result[1]
+    with caplog.at_level('WARNING', logger='astroquery'):
+        assert 'You are not authorized to download' in caplog.text
+        assert 'You do not have access to download this data' in caplog.text
+
+
+def test_missions_get_dataset_kwd(patch_post, caplog):
+    m = mast.MastMissions()
+
+    # Default is HST
+    assert m.mission == 'hst'
+    assert m.get_dataset_kwd() == 'sci_data_set_name'
+
+    # Switch to JWST
+    m.mission = 'JWST'  # case-insensitive
+    assert m.mission == 'jwst'
+    assert m.get_dataset_kwd() == 'fileSetName'
+
+    # Switch to an HLSP
+    m.mission = 'Classy'
+    assert m.mission == 'classy'
+    assert m.get_dataset_kwd() == 'Target'
+
+    # Switch to an unknown
+    m.mission = 'Unknown'
+    assert m.mission == 'unknown'
+    assert m.get_dataset_kwd() is None
+    with caplog.at_level('WARNING', logger='astroquery'):
+        assert 'The mission "unknown" does not have a known dataset ID keyword' in caplog.text
 
 ###################
 # MastClass tests #
@@ -324,7 +483,6 @@ def test_mast_query(patch_post):
 
 def test_resolve_object(patch_post):
     m103_loc = mast.Mast.resolve_object("M103")
-    print(m103_loc)
     assert round(m103_loc.separation(SkyCoord("23.34086 60.658", unit='deg')).value, 10) == 0
 
 

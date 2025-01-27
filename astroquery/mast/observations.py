@@ -19,8 +19,9 @@ from requests import HTTPError
 import astropy.units as u
 import astropy.coordinates as coord
 
-from astropy.table import Table, Row, unique, vstack
+from astropy.table import Table, Row, vstack
 from astroquery import log
+from astroquery.mast.cloud import CloudAccess
 
 from ..utils import commons, async_to_sync
 from ..utils.class_or_instance import class_or_instance
@@ -170,6 +171,30 @@ class ObservationsClass(MastQueryWithLogin):
             position = ', '.join([str(x) for x in (coordinates.ra.deg, coordinates.dec.deg, radius.deg)])
 
         return position, mashup_filters
+
+    def enable_cloud_dataset(self, provider="AWS", profile=None, verbose=True):
+        """
+        Enable downloading public files from S3 instead of MAST.
+        Requires the boto3 library to function.
+
+        Parameters
+        ----------
+        provider : str
+            Which cloud data provider to use.  We may in the future support multiple providers,
+            though at the moment this argument is ignored.
+        profile : str
+            Profile to use to identify yourself to the cloud provider (usually in ~/.aws/config).
+        verbose : bool
+            Default True.
+            Logger to display extra info and warning.
+        """
+        self._cloud_connection = CloudAccess(provider, profile, verbose)
+
+    def disable_cloud_dataset(self):
+        """
+        Disables downloading public files from S3 instead of MAST.
+        """
+        self._cloud_connection = None
 
     @class_or_instance
     def query_region_async(self, coordinates, *, radius=0.2*u.deg, pagesize=None, page=None):
@@ -456,6 +481,8 @@ class ObservationsClass(MastQueryWithLogin):
         Given a "Product Group Id" (column name obsid) returns a list of associated data products.
         Note that obsid is NOT the same as obs_id, and inputting obs_id values will result in
         an error. See column documentation `here <https://masttest.stsci.edu/api/v0/_productsfields.html>`__.
+
+        To return unique data products, use ``Observations.get_unique_product_list``.
 
         Parameters
         ----------
@@ -789,7 +816,7 @@ class ObservationsClass(MastQueryWithLogin):
         products = self.filter_products(products, mrp_only=mrp_only, **filters)
 
         # remove duplicate products
-        products = self._remove_duplicate_products(products)
+        products = utils.remove_duplicate_products(products, 'dataURI')
 
         if not len(products):
             warnings.warn("No products to download.", NoResultsWarning)
@@ -901,7 +928,7 @@ class ObservationsClass(MastQueryWithLogin):
             return
 
         # Remove duplicate products
-        data_products = self._remove_duplicate_products(data_products)
+        data_products = utils.remove_duplicate_products(data_products, 'dataURI')
 
         return self._cloud_connection.get_cloud_uri_list(data_products, include_bucket, full_url)
 
@@ -939,28 +966,28 @@ class ObservationsClass(MastQueryWithLogin):
         # Query for product URIs
         return self._cloud_connection.get_cloud_uri(data_product, include_bucket, full_url)
 
-    def _remove_duplicate_products(self, data_products):
+    def get_unique_product_list(self, observations):
         """
-        Removes duplicate data products that have the same dataURI.
+        Given a "Product Group Id" (column name obsid), returns a list of associated data products with
+        unique dataURIs. Note that obsid is NOT the same as obs_id, and inputting obs_id values will result in
+        an error. See column documentation `here <https://masttest.stsci.edu/api/v0/_productsfields.html>`__.
 
         Parameters
         ----------
-        data_products : `~astropy.table.Table`
-            Table containing products to be checked for duplicates.
+        observations : str or `~astropy.table.Row` or list/Table of same
+            Row/Table of MAST query results (e.g. output from `query_object`)
+            or single/list of MAST Product Group Id(s) (obsid).
+            See description `here <https://masttest.stsci.edu/api/v0/_c_a_o_mfields.html>`__.
 
         Returns
         -------
         unique_products : `~astropy.table.Table`
             Table containing products with unique dataURIs.
-
         """
-        number = len(data_products)
-        unique_products = unique(data_products, keys="dataURI")
-        number_unique = len(unique_products)
-        if number_unique < number:
-            log.info(f"{number - number_unique} of {number} products were duplicates. "
-                     f"Only downloading {number_unique} unique product(s).")
-
+        products = self.get_product_list(observations)
+        unique_products = utils.remove_duplicate_products(products, 'dataURI')
+        if len(unique_products) < len(products):
+            log.info("To return all products, use `Observations.get_product_list`")
         return unique_products
 
 

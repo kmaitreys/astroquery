@@ -42,25 +42,32 @@ jobs:
             toxenv: py39-test-oldestdeps-alldeps
             toxargs: -v
 
-          - name: Python 3.10 with all optional dependencies (MacOS X)
+          - name: OSX, py310, all optional dependencies
             os: macos-latest
             python: "3.10"
             toxenv: py310-test-alldeps
             toxargs: -v
 
-          - name: Python 3.11 with mandatory dependencies (Windows)
+          - name: Windows, py311, mandatory dependencies only
             os: windows-latest
             python: "3.11"
             toxenv: py311-test
             toxargs: -v
 
+          - name: Linux ARM, py312, all optional dependencies
+            os: ubuntu-24.04-arm
+            python: "3.12"
+            toxenv: py312-test-alldeps
+            toxargs: -v
+
+
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       with:
         fetch-depth: 0
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
       with:
         python-version: ${{ matrix.python }}
     - name: Install Python dependencies
@@ -69,7 +76,7 @@ jobs:
       run: tox ${{ matrix.toxargs }} -e ${{ matrix.toxenv }} -- ${{ matrix.toxposargs }}
     - name: Upload coverage to codecov
       if: contains(matrix.toxenv,'-cov')
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@015f24e6818733317a2da2edd6290ab26238649a  # v5.0.7
       with:
         file: ./coverage.xml
 
@@ -78,11 +85,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       with:
         fetch-depth: 0
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
       with:
         python-version: "3.9"
     - name: Run egg_info

@@ -55,6 +55,17 @@ class TestSimbad:
         result = self.simbad.query_catalog('M')
         assert len(result) == 110
 
+    def test_query_hierarchy(self):
+        self.simbad.ROW_LIMIT = -1
+        obj = "NGC 4038"
+        parents = self.simbad.query_hierarchy(obj, hierarchy="parents")
+        assert len(parents) == 4
+        children = self.simbad.query_hierarchy(obj, hierarchy="children")
+        assert len(children) >= 45  # as of 2025, but more could be added
+        siblings = self.simbad.query_hierarchy(obj, hierarchy="siblings",
+                                               criteria="otype='G..'")
+        assert len(siblings) >= 29
+
     def test_query_region(self):
         self.simbad.ROW_LIMIT = 10
         result = self.simbad.query_region(ICRS_COORDS_M42, radius="1d")
@@ -204,3 +215,10 @@ class TestSimbad:
         simbad_instance.add_votable_fields("u")
         result = simbad_instance.query_object("HD 147933")
         assert all(filtername in result.colnames for filtername in {"u", "U", "V"})
+
+    def test_double_ident_in_query_objects(self):
+        simbad = Simbad()
+        simbad.add_votable_fields("ident")
+        result = simbad.query_objects(['HD 1'])
+        assert len(result) > 1
+        assert all(result["main_id"] == "HD      1")

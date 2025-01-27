@@ -7,7 +7,7 @@ import pytest
 
 from requests.models import Response
 
-from astropy.table import Table
+from astropy.table import Table, unique
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 import astropy.units as u
@@ -135,6 +135,209 @@ class TestMast:
         with pytest.raises(InvalidQueryError):
             MastMissions.query_criteria(coordinates="245.89675 -26.52575",
                                         radius=1)
+
+    def test_missions_query_criteria_invalid_keyword(self):
+        # Attempt to make a criteria query with invalid keyword
+        with pytest.raises(InvalidQueryError) as err_no_alt:
+            MastMissions.query_criteria(select_cols=['sci_targname'],
+                                        not_a_keyword='test')
+        assert "Filter 'not_a_keyword' does not exist." in str(err_no_alt.value)
+
+        # Attempt to make a region query with invalid keyword
+        with pytest.raises(InvalidQueryError) as err_no_alt:
+            MastMissions.query_region(coordinates="245.89675 -26.52575",
+                                      invalid_keyword='test')
+        assert "Filter 'invalid_keyword' does not exist." in str(err_no_alt.value)
+
+        # Keyword is close enough for difflib to offer alternative
+        with pytest.raises(InvalidQueryError) as err_with_alt:
+            MastMissions.query_criteria(search_position='30 30')
+        assert 'search_pos' in str(err_with_alt.value)
+
+    def test_missions_get_product_list_async(self):
+        datasets = MastMissions.query_object("M4", radius=0.1)
+
+        # Table as input
+        responses = MastMissions.get_product_list_async(datasets[:3])
+        assert isinstance(responses, Response)
+
+        # Row as input
+        responses = MastMissions.get_product_list_async(datasets[0])
+        assert isinstance(responses, Response)
+
+        # String as input
+        responses = MastMissions.get_product_list_async(datasets[0]['sci_data_set_name'])
+        assert isinstance(responses, Response)
+
+        # Column as input
+        responses = MastMissions.get_product_list_async(datasets[:3]['sci_data_set_name'])
+        assert isinstance(responses, Response)
+
+        # Unsupported data type for datasets
+        with pytest.raises(TypeError) as err_type:
+            MastMissions.get_product_list_async(1)
+        assert 'Unsupported data type' in str(err_type.value)
+
+        # Empty dataset list
+        with pytest.raises(InvalidQueryError) as err_empty:
+            MastMissions.get_product_list_async([' '])
+        assert 'Dataset list is empty' in str(err_empty.value)
+
+    def test_missions_get_product_list(self):
+        datasets = MastMissions.query_object("M4", radius=0.1)
+        test_dataset = datasets[0]['sci_data_set_name']
+        multi_dataset = list(datasets[:2]['sci_data_set_name'])
+
+        # Compare Row input and string input
+        result1 = MastMissions.get_product_list(test_dataset)
+        result2 = MastMissions.get_product_list(datasets[0])
+        assert isinstance(result1, Table)
+        assert len(result1) == len(result2)
+        assert set(result1['filename']) == set(result2['filename'])
+
+        # Compare Table input and list input
+        result1 = MastMissions.get_product_list(multi_dataset)
+        result2 = MastMissions.get_product_list(datasets[:2])
+        assert isinstance(result1, Table)
+        assert len(result1) == len(result2)
+        assert set(result1['filename']) == set(result2['filename'])
+
+        # Filter datasets based on sci_data_set_name and verify products
+        filtered = datasets[datasets['sci_data_set_name'] == 'IBKH03020']
+        result = MastMissions.get_product_list(filtered)
+        assert isinstance(result, Table)
+        assert (result['dataset'] == 'IBKH03020').all()
+
+    def test_missions_get_unique_product_list(self, caplog):
+        # Check that no rows are filtered out when all products are unique
+        dataset_ids = ['JBTAA8010']
+        products = MastMissions.get_product_list(dataset_ids)
+        unique_products = MastMissions.get_unique_product_list(dataset_ids)
+
+        # Should have the same length
+        assert len(products) == len(unique_products)
+        # No INFO messages should be logged
+        with caplog.at_level('INFO', logger='astroquery'):
+            assert caplog.text == ''
+
+        # Check that rows are filtered out when products are not unique
+        dataset_ids.append('JBTAA8020')
+        products = MastMissions.get_product_list(dataset_ids)
+        unique_products = MastMissions.get_unique_product_list(dataset_ids)
+
+        # Unique product list should have fewer rows
+        assert len(products) > len(unique_products)
+        # Rows should be unique based on filename
+        assert (unique_products == unique(unique_products, keys='filename')).all()
+        # Check that INFO messages were logged
+        with caplog.at_level('INFO', logger='astroquery'):
+            assert 'products were duplicates' in caplog.text
+            assert 'To return all products' in caplog.text
+
+    def test_missions_filter_products(self):
+        # Filter by extension
+        products = MastMissions.get_product_list('W0FX0301T')
+        filtered = MastMissions.filter_products(products,
+                                                extension='jpg')
+        assert isinstance(filtered, Table)
+        assert all(filename.endswith('.jpg') for filename in filtered['filename'])
+
+        # Filter by existing column
+        filtered = MastMissions.filter_products(products,
+                                                category='CALIBRATED')
+        assert isinstance(filtered, Table)
+        assert all(filtered['category'] == 'CALIBRATED')
+
+        # Filter by non-existing column
+        with pytest.warns(InputWarning):
+            filtered = MastMissions.filter_products(products,
+                                                    invalid=True)
+
+    def test_missions_download_products(self, tmp_path):
+        def check_filepath(path):
+            assert path.is_file()
+
+        # Check string input
+        test_dataset_id = 'Z14Z0104T'
+        result = MastMissions.download_products(test_dataset_id,
+                                                download_dir=tmp_path)
+        for row in result:
+            if row['Status'] == 'COMPLETE':
+                check_filepath(row['Local Path'])
+
+        # Check Row input
+        datasets = MastMissions.query_object("M4", radius=0.1)
+        prods = MastMissions.get_product_list(datasets[0])[0]
+        result = MastMissions.download_products(prods,
+                                                download_dir=tmp_path)
+        check_filepath(result['Local Path'][0])
+
+        # Warn about no products
+        with pytest.warns(NoResultsWarning):
+            result = MastMissions.download_products(test_dataset_id,
+                                                    extension='jpg',
+                                                    download_dir=tmp_path)
+
+    def test_missions_download_products_flat(self, tmp_path):
+        # Download products without creating subdirectories
+        result = MastMissions.download_products('Z14Z0104T',
+                                                flat=True,
+                                                download_dir=tmp_path)
+        for row in result:
+            if row['Status'] == 'COMPLETE':
+                assert row['Local Path'].parent == tmp_path
+
+    def test_missions_download_file(self, tmp_path):
+        def check_result(result, path):
+            assert result == ('COMPLETE', None, None)
+            assert path.is_file()
+
+        # Get URI from data product
+        product = MastMissions.get_product_list('Z14Z0104T')[0]
+        uri = product['uri']
+        filename = Path(uri).name
+
+        # Download with unspecified local_path
+        # Should download to current working directory
+        result = MastMissions.download_file(uri)
+        check_result(result, Path(os.getcwd(), filename))
+        Path.unlink(filename)  # clean up file
+
+        # Download with directory as local_path parameter
+        local_path = Path(tmp_path, filename)
+        result = MastMissions.download_file(uri, local_path=tmp_path)
+        check_result(result, local_path)
+
+        # Download with filename as local_path parameter
+        local_path_file = Path(tmp_path, 'test.fits')
+        result = MastMissions.download_file(uri, local_path=local_path_file)
+        check_result(result, local_path_file)
+
+    @pytest.mark.parametrize("mission, query_params", [
+        ('jwst', {'fileSetName': 'jw01189001001_02101_00001'}),
+        ('classy', {'target': 'J0021+0052'}),
+        ('ullyses', {'host_galaxy_name': 'WLM', 'select_cols': ['observation_id']})
+    ])
+    def test_missions_workflow(self, tmp_path, mission, query_params):
+        # Test workflow with other missions
+        m = MastMissions(mission=mission)
+
+        # Criteria query
+        datasets = m.query_criteria(**query_params)
+        assert isinstance(datasets, Table)
+        assert len(datasets)
+
+        # Get products
+        prods = m.get_product_list(datasets[0])
+        assert isinstance(prods, Table)
+        assert len(prods)
+
+        # Download products
+        result = m.download_products(prods[:3],
+                                     download_dir=tmp_path)
+        for row in result:
+            if row['Status'] == 'COMPLETE':
+                assert (row['Local Path']).is_file()
 
     ###################
     # MastClass tests #
@@ -380,6 +583,32 @@ class TestMast:
         assert len(prods) > 0
         assert (np.char.find(prods['obs_id'], '429031146') != -1).all()
 
+    def test_observations_get_unique_product_list(self, caplog):
+        # Check that no rows are filtered out when all products are unique
+        obsids = ['24832668']
+        products = Observations.get_product_list(obsids)
+        unique_products = Observations.get_unique_product_list(obsids)
+
+        # Should have the same length
+        assert len(products) == len(unique_products)
+        # No INFO messages should be logged
+        with caplog.at_level('INFO', logger='astroquery'):
+            assert caplog.text == ''
+
+        # Check that rows are filtered out when products are not unique
+        obsids.append('26421364')
+        products = Observations.get_product_list(obsids)
+        unique_products = Observations.get_unique_product_list(obsids)
+
+        # Unique product list should have fewer rows
+        assert len(products) > len(unique_products)
+        # Rows should be unique based on dataURI
+        assert (unique_products == unique(unique_products, keys='dataURI')).all()
+        # Check that INFO messages were logged
+        with caplog.at_level('INFO', logger='astroquery'):
+            assert 'products were duplicates' in caplog.text
+            assert 'To return all products' in caplog.text
+
     def test_observations_filter_products(self):
         observations = Observations.query_object("M8", radius=".04 deg")
         obsLoc = np.where(observations["obs_id"] == 'ktwo200071160-c92_lc')
@@ -390,14 +619,13 @@ class TestMast:
         assert isinstance(result, Table)
         assert len(result) == sum(products['productType'] == "SCIENCE")
 
-    def test_observations_download_products(self, tmpdir):
+    def test_observations_download_products(self, tmp_path):
         def check_filepath(path):
             assert os.path.isfile(path)
-            os.remove(path)
 
         test_obs_id = '25119363'
         result = Observations.download_products(test_obs_id,
-                                                download_dir=str(tmpdir),
+                                                download_dir=tmp_path,
                                                 productType=["SCIENCE"],
                                                 mrp_only=False)
         assert isinstance(result, Table)
@@ -407,7 +635,7 @@ class TestMast:
 
         # just get the curl script
         result = Observations.download_products(test_obs_id,
-                                                download_dir=str(tmpdir),
+                                                download_dir=tmp_path,
                                                 curl_flag=True,
                                                 productType=["SCIENCE"],
                                                 mrp_only=False)
@@ -416,7 +644,8 @@ class TestMast:
 
         # check for row input
         result1 = Observations.get_product_list(test_obs_id)
-        result2 = Observations.download_products(result1[0])
+        result2 = Observations.download_products(result1[0],
+                                                 download_dir=tmp_path)
         assert isinstance(result2, Table)
         check_filepath(result2['Local Path'][0])
         assert len(result2) == 1
@@ -473,11 +702,8 @@ class TestMast:
         # enable access to public AWS S3 bucket
         Observations.enable_cloud_dataset(provider='AWS')
 
-        # Check for cloud URIs.  Accept a NoResultsWarning if AWS S3
-        # doesn't have the file.  It doesn't matter as we're only checking
-        # that the duplicate products have been culled to a single one.
-        with pytest.warns(NoResultsWarning):
-            uris = Observations.get_cloud_uris(products)
+        # Check that only one URI is returned
+        uris = Observations.get_cloud_uris(products)
         assert len(uris) == 1
 
     def test_observations_download_file(self, tmp_path):
@@ -564,7 +790,7 @@ class TestMast:
         assert len(uri) > 0, f'Product for dataURI {test_data_uri} was not found in the cloud.'
         assert uri == expected_cloud_uri, f'Cloud URI does not match expected. ({uri} != {expected_cloud_uri})'
 
-    @pytest.mark.parametrize("test_obs_id", ["25568122", "31411"])
+    @pytest.mark.parametrize("test_obs_id", ["25568122", "31411", "107604081"])
     def test_get_cloud_uris(self, test_obs_id):
         pytest.importorskip("boto3")
 
@@ -921,6 +1147,25 @@ class TestMast:
         with pytest.raises(InvalidQueryError) as err_with_alt:
             Catalogs.query_criteria(catalog='ctl', objectType="STAR")
         assert 'objType' in str(err_with_alt.value)
+
+        # region query with invalid keyword
+        with pytest.raises(InvalidQueryError) as err_region:
+            Catalogs.query_region('322.49324 12.16683',
+                                  radius=0.001*u.deg,
+                                  catalog='HSC',
+                                  invalid=2)
+        assert "Filter 'invalid' does not exist for catalog HSC." in str(err_region.value)
+
+        # panstarrs criteria query with invalid keyword
+        with pytest.raises(InvalidQueryError) as err_ps_criteria:
+            Catalogs.query_criteria(coordinates="158.47924 -7.30962",
+                                    catalog="PANSTARRS",
+                                    table="mean",
+                                    data_release="dr2",
+                                    columns=["objName", "distance"],
+                                    sort_by=[("asc", "distance")],
+                                    obj_name='invalid')
+        assert 'objName' in str(err_ps_criteria.value)
 
     def test_catalogs_query_hsc_matchid_async(self):
         catalogData = Catalogs.query_object("M10",
